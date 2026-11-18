@@ -1,0 +1,9 @@
+parameters:
+    level: 8
+    paths:
+        - src
+    ignoreErrors:
+        # Ledger API answers are returned as plain decoded-JSON arrays for now.
+        - identifier: missingType.iterableValue
+        # HandlerStack is generic in Guzzle 8 but not in Guzzle 7; both are supported.
+        - identifier: missingType.generics

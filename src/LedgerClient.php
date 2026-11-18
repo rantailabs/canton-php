@@ -7,6 +7,7 @@ namespace RantaiLabs\Canton;
 use GuzzleHttp\Client;
 use GuzzleHttp\Exception\TransferException;
 use GuzzleHttp\HandlerStack;
+use Psr\Log\LoggerInterface;
 use stdClass;
 
 /**
@@ -25,22 +26,28 @@ class LedgerClient
      * @param string|callable(): string $token Bearer token, or something that returns a fresh one
      *                                         on every call (e.g. ClientCredentials)
      * @param float $timeout Seconds to wait for an answer before giving up
+     * @param LoggerInterface|null $logger Gets one debug line per request (method, path, status,
+     *                                     duration). Tokens and payloads are never logged.
      * @param HandlerStack|null $handler Custom Guzzle handler, mainly for tests
      */
     public function __construct(
         string $baseUrl,
         string|callable $token,
         float $timeout = 30,
+        private readonly ?LoggerInterface $logger = null,
         ?HandlerStack $handler = null,
     ) {
         $this->token = $token;
-        $this->http = new Client([
+        $options = [
             'base_uri' => rtrim($baseUrl, '/'),
             'http_errors' => false,
             'connect_timeout' => min($timeout, 10),
             'timeout' => $timeout,
-            'handler' => $handler,
-        ]);
+        ];
+        if ($handler !== null) {
+            $options['handler'] = $handler;
+        }
+        $this->http = new Client($options);
     }
 
     /** Participant version and supported features. */
@@ -55,41 +62,76 @@ class LedgerClient
         return $this->request('GET', '/v2/state/ledger-end')['offset'];
     }
 
-    /** Parties known to the participant. */
+    /** Parties known to the participant, fetched page by page. */
     public function parties(): array
     {
-        return $this->request('GET', '/v2/parties')['partyDetails'];
+        $parties = [];
+        $pageToken = '';
+        do {
+            $page = $this->request('GET', '/v2/parties', query: array_filter(['pageToken' => $pageToken]));
+            array_push($parties, ...$page['partyDetails']);
+            $pageToken = $page['nextPageToken'] ?? '';
+        } while ($pageToken !== '');
+
+        return $parties;
+    }
+
+    /** The ledger user the token belongs to (id, primaryParty, ...). */
+    public function authenticatedUser(): array
+    {
+        return $this->request('GET', '/v2/authenticated-user')['user'];
+    }
+
+    /** Synchronizers the participant is connected to on behalf of a party. */
+    public function connectedSynchronizers(string $party): array
+    {
+        return $this->request('GET', '/v2/state/connected-synchronizers', query: ['party' => $party])['connectedSynchronizers'];
+    }
+
+    /** IDs of the Daml packages uploaded to the participant. */
+    public function packages(): array
+    {
+        return $this->request('GET', '/v2/packages')['packageIds'];
     }
 
     /**
      * Contracts currently active for a party, as created events
      * (contractId, templateId, createArgument, signatories, ...).
+     * Fetched page by page, so large sets do not hit the node's response size limit.
      *
      * @param int|null $atOffset Snapshot offset; defaults to the ledger end
+     * @param int|null $pageSize Contracts per request; defaults to the node's setting
      */
-    public function activeContracts(string $party, ?int $atOffset = null): array
+    public function activeContracts(string $party, ?int $atOffset = null, ?int $pageSize = null): array
     {
-        $entries = $this->request('POST', '/v2/state/active-contracts', [
-            'activeAtOffset' => $atOffset ?? $this->ledgerEnd(),
-            'eventFormat' => [
-                'filtersByParty' => [
-                    $party => [
-                        'cumulative' => [
-                            ['identifierFilter' => ['WildcardFilter' => ['value' => ['includeCreatedEventBlob' => false]]]],
-                        ],
+        $eventFormat = [
+            'filtersByParty' => [
+                $party => [
+                    'cumulative' => [
+                        ['identifierFilter' => ['WildcardFilter' => ['value' => ['includeCreatedEventBlob' => false]]]],
                     ],
                 ],
-                'verbose' => true,
             ],
-        ]);
+            'verbose' => true,
+        ];
 
-        // Entries can also be in-flight reassignments; keep only active contracts.
         $contracts = [];
-        foreach ($entries as $entry) {
-            if (isset($entry['contractEntry']['JsActiveContract'])) {
-                $contracts[] = $entry['contractEntry']['JsActiveContract']['createdEvent'];
+        // The page token remembers the snapshot offset; the node rejects a token sent together
+        // with activeAtOffset, so the offset only goes with the first page.
+        $paging = array_filter(['maxPageSize' => $pageSize], fn ($v) => $v !== null);
+        $body = $paging + array_filter(['eventFormat' => $eventFormat, 'activeAtOffset' => $atOffset], fn ($v) => $v !== null);
+        do {
+            $page = $this->request('GET', '/v2/state/active-contracts-page', $body);
+
+            // Entries can also be in-flight reassignments; keep only active contracts.
+            foreach ($page['activeContracts'] as $entry) {
+                if (isset($entry['contractEntry']['JsActiveContract'])) {
+                    $contracts[] = $entry['contractEntry']['JsActiveContract']['createdEvent'];
+                }
             }
-        }
+
+            $body = $paging + ['eventFormat' => $eventFormat, 'pageToken' => $page['nextPageToken'] ?? ''];
+        } while ($body['pageToken'] !== '');
 
         return $contracts;
     }
@@ -156,21 +198,29 @@ class LedgerClient
         return $response['transaction']['events'];
     }
 
-    private function request(string $method, string $path, ?array $body = null): array
+    private function request(string $method, string $path, ?array $body = null, array $query = []): array
     {
         $token = is_string($this->token) ? $this->token : ($this->token)();
-        $options = ['headers' => ['Authorization' => "Bearer $token"]];
+        $options = ['headers' => ['Authorization' => "Bearer $token"], 'query' => $query];
         if ($body !== null) {
             $options['json'] = $body;
         }
+        $started = microtime(true);
         try {
             $response = $this->http->request($method, $path, $options);
         } catch (TransferException $e) {
+            $this->logger?->debug('Canton request failed', ['method' => $method, 'path' => $path, 'error' => $e->getMessage()]);
             // node unreachable or too slow; no HTTP status
             throw new LedgerException($e->getMessage(), 0, null, $e);
         }
         $content = (string) $response->getBody();
         $status = $response->getStatusCode();
+        $this->logger?->debug('Canton request', [
+            'method' => $method,
+            'path' => $path,
+            'status' => $status,
+            'duration_ms' => (int) round((microtime(true) - $started) * 1000),
+        ]);
 
         if ($status >= 400) {
             $error = json_decode($content, true);

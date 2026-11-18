@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace RantaiLabs\Canton\Laravel;
 
 use Illuminate\Support\ServiceProvider;
+use InvalidArgumentException;
 use RantaiLabs\Canton\ClientCredentials;
 use RantaiLabs\Canton\LedgerClient;
 use RantaiLabs\Canton\SharedSecretToken;
@@ -29,9 +30,17 @@ final class CantonServiceProvider extends ServiceProvider
                     // share tokens between requests instead of fetching one per request
                     $app['cache.store'],
                 ),
+                default => throw new InvalidArgumentException(
+                    "Unknown CANTON_AUTH value \"{$config['auth']}\": use \"shared-secret\" or \"oauth2\".",
+                ),
             };
 
-            return new LedgerClient($config['url'], $token, (float) $config['timeout']);
+            return new LedgerClient(
+                $config['url'],
+                $token,
+                (float) $config['timeout'],
+                $config['logging'] ? $app['log'] : null,
+            );
         });
     }
 

@@ -42,6 +42,15 @@ final class LaravelTest extends TestCase
         $this->assertInstanceOf(LedgerClient::class, $this->app->make(LedgerClient::class));
     }
 
+    public function testUnknownAuthModeGivesAClearError(): void
+    {
+        config(['canton.auth' => 'oauth']);
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('Unknown CANTON_AUTH value "oauth"');
+        $this->app->make(LedgerClient::class);
+    }
+
     public function testFacadeForwardsToLedgerClient(): void
     {
         Canton::shouldReceive('ledgerEnd')->once()->andReturn(55);

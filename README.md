@@ -1,43 +1,21 @@
 # canton-php
 
-PHP client for the [Canton](https://www.canton.network/) JSON Ledger API (v2).
+[![CI](https://github.com/rantailabs/canton-php/actions/workflows/ci.yml/badge.svg)](https://github.com/rantailabs/canton-php/actions/workflows/ci.yml)
 
-Early work in progress.
+PHP client and Laravel integration for the [Canton Network](https://www.canton.network/)
+JSON Ledger API (v2).
 
-## Authentication
-
-LocalNet from cn-quickstart uses a shared secret:
-
-```php
-$token = SharedSecretToken::create('ledger-api-user', 'https://canton.network.global', 'unsafe');
-```
-
-DevNet, TestNet and MainNet nodes use an OAuth2 provider. `ClientCredentials`
-gets tokens with the client credentials grant and renews them before they expire:
-
-```php
-$token = new ClientCredentials(
-    tokenUrl: 'https://auth.example.com/oauth/token',
-    clientId: 'my-backend',
-    clientSecret: getenv('CANTON_CLIENT_SECRET'),
-    audience: 'https://canton.network.global', // needed by Auth0
-    scope: 'openid',                           // needed by Keycloak
-);
-$ledger = new LedgerClient('https://ledger.example.com', $token);
-```
-
-Each PHP process keeps its own token. With PHP-FPM that means one token request
-per web request, so pass a PSR-16 cache (`cache: $cache`) to share tokens between
-processes. The Laravel integration does this automatically.
-
-`LedgerClient` accepts any callable that returns a token, so other token
-sources can be plugged in the same way.
+> **Status: early (0.x).** Reading the ledger and submitting create/exercise
+> commands work and are tested against a cn-quickstart LocalNet. Token Standard
+> support, update streams and other parts of the Ledger Client Standard are not
+> there yet. See [CHANGELOG.md](CHANGELOG.md).
 
 ## Requirements
 
 - PHP 8.2 or newer
 - Guzzle 7 or 8
 - Laravel 12 or 13, for the optional Laravel integration
+- Tested against Canton 3.5 (cn-quickstart LocalNet)
 
 ## Install
 
@@ -55,21 +33,58 @@ use RantaiLabs\Canton\SharedSecretToken;
 $token = SharedSecretToken::create('ledger-api-user', 'https://canton.network.global', 'unsafe');
 $ledger = new LedgerClient('http://localhost:3975', $token);
 
-$ledger->version();               // participant version and features
-$ledger->ledgerEnd();             // latest offset
-$ledger->parties();               // known parties
-$ledger->activeContracts($party); // active contracts visible to $party
+$ledger->version();                      // participant version and features
+$ledger->ledgerEnd();                    // latest offset
+$ledger->authenticatedUser();            // the ledger user of this token
+$ledger->parties();                      // known parties
+$ledger->connectedSynchronizers($party); // synchronizers serving $party
+$ledger->packages();                     // uploaded package IDs
+$ledger->activeContracts($party);        // active contracts visible to $party
 
 // write: both wait until the transaction is committed
 $created = $ledger->create('#my-package:My.Module:Asset', ['owner' => $party], actAs: $party);
 $result = $ledger->exercise('#my-package:My.Module:Asset', $created['contractId'], 'Transfer', ['newOwner' => $bob], actAs: $party);
 ```
 
+`parties()` and `activeContracts()` fetch page by page, so large result sets do
+not hit the node's response size limit. `activeContracts()` takes an optional
+`pageSize` to tune memory use.
+
 Daml records with no fields (e.g. an empty `TextMap`) must be passed as
 `new stdClass()`, since PHP encodes an empty array as `[]`.
 
 See [examples/licensing-demo.php](examples/licensing-demo.php) for a full flow
 against the cn-quickstart licensing app.
+
+## Authentication
+
+LocalNet from cn-quickstart uses a shared secret, as in the example above.
+
+> **Warning:** shared-secret auth and the `unsafe` secret are for LocalNet only.
+> Never use them against a node that holds real assets.
+
+DevNet, TestNet and MainNet nodes use an OAuth2 provider. `ClientCredentials`
+gets tokens with the client credentials grant and renews them before they expire:
+
+```php
+$token = new ClientCredentials(
+    tokenUrl: 'https://auth.example.com/oauth/token',
+    clientId: 'my-backend',
+    clientSecret: getenv('CANTON_CLIENT_SECRET'),
+    audience: 'https://canton.network.global', // needed by Auth0
+    scope: 'openid',                           // needed by Keycloak
+    cache: $psr16Cache,                        // optional, see below
+);
+$ledger = new LedgerClient('https://ledger.example.com', $token);
+```
+
+Each PHP process keeps its own token. With PHP-FPM that means one token request
+per web request, so pass a PSR-16 cache to share tokens between processes. The
+Laravel integration does this automatically. Tokens in the cache are secrets;
+see [SECURITY.md](SECURITY.md).
+
+`LedgerClient` accepts any callable that returns a token, so other token
+sources can be plugged in the same way.
 
 ## Errors and retries
 
@@ -96,6 +111,15 @@ try {
 }
 ```
 
+## Logging
+
+Pass any PSR-3 logger to get one debug line per request (method, path, status,
+duration). Tokens and request/response bodies are never logged.
+
+```php
+$ledger = new LedgerClient('http://localhost:3975', $token, logger: $logger);
+```
+
 ## Laravel
 
 The service provider and the `Canton` facade are registered automatically.
@@ -104,11 +128,14 @@ Configure the connection in `.env`:
 ```dotenv
 CANTON_URL=http://localhost:3975
 CANTON_TIMEOUT=30
+CANTON_LOGGING=false
+
+# shared secret (LocalNet only)
 CANTON_USER=ledger-api-user
 CANTON_AUDIENCE=https://canton.network.global
 CANTON_SECRET=unsafe
 
-# or, for OAuth2
+# or OAuth2
 CANTON_AUTH=oauth2
 CANTON_TOKEN_URL=https://auth.example.com/oauth/token
 CANTON_CLIENT_ID=my-backend
@@ -130,13 +157,16 @@ You can also inject `RantaiLabs\Canton\LedgerClient`, and mock it in tests with
 php artisan vendor:publish --tag=canton-config
 ```
 
-## Tests
+## Development
 
 ```bash
 composer test                          # unit tests
+composer analyse                       # PHPStan
 CANTON_LOCALNET=1 composer test        # plus tests against a running cn-quickstart LocalNet
 CANTON_LOCALNET=oauth2 composer test   # same, for a LocalNet started with AUTH_MODE=oauth2
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Security issues: [SECURITY.md](SECURITY.md).
 
 ## License
 

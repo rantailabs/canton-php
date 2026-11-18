@@ -49,39 +49,88 @@ final class LedgerClientTest extends TestCase
         $this->assertSame(55, $this->client(self::json(['offset' => 55]))->ledgerEnd());
     }
 
-    public function testPartiesReturnsPartyDetails(): void
+    public function testPartiesFollowsPagesUntilNoNextPageToken(): void
     {
-        $parties = $this->client(self::json(['partyDetails' => [['party' => 'alice::1220ab', 'isLocal' => true]]]))->parties();
+        $parties = $this->client(
+            self::json(['partyDetails' => [['party' => 'alice::1220ab']], 'nextPageToken' => 'page-2']),
+            self::json(['partyDetails' => [['party' => 'bob::1220cd']], 'nextPageToken' => '']),
+        )->parties();
 
-        $this->assertSame([['party' => 'alice::1220ab', 'isLocal' => true]], $parties);
+        $this->assertSame([['party' => 'alice::1220ab'], ['party' => 'bob::1220cd']], $parties);
+        $this->assertSame('', $this->sent[0]['request']->getUri()->getQuery());
+        $this->assertSame('pageToken=page-2', $this->sent[1]['request']->getUri()->getQuery());
     }
 
-    public function testActiveContractsQueriesAtLedgerEndAndKeepsOnlyActiveContracts(): void
+    public function testAuthenticatedUserConnectedSynchronizersAndPackages(): void
     {
-        $contract = ['contractId' => '00abc', 'templateId' => 'pkg:Licensing.License:License'];
+        $client = $this->client(
+            self::json(['user' => ['id' => 'ledger-api-user', 'primaryParty' => 'alice::1220ab']]),
+            self::json(['connectedSynchronizers' => [['synchronizerId' => 'global-domain::1220ef']]]),
+            self::json(['packageIds' => ['abc123']]),
+        );
+
+        $this->assertSame('alice::1220ab', $client->authenticatedUser()['primaryParty']);
+        $this->assertSame('global-domain::1220ef', $client->connectedSynchronizers('alice::1220ab')[0]['synchronizerId']);
+        $this->assertSame(['abc123'], $client->packages());
+        $this->assertSame('party=alice%3A%3A1220ab', $this->sent[1]['request']->getUri()->getQuery());
+    }
+
+    public function testActiveContractsFollowsPagesAndKeepsOnlyActiveContracts(): void
+    {
+        $first = ['contractId' => '00abc'];
+        $second = ['contractId' => '00def'];
 
         $contracts = $this->client(
-            self::json(['offset' => 55]),
-            self::json([
-                ['contractEntry' => ['JsActiveContract' => ['createdEvent' => $contract]]],
+            self::json(['activeAtOffset' => 55, 'nextPageToken' => 'page-2', 'activeContracts' => [
+                ['contractEntry' => ['JsActiveContract' => ['createdEvent' => $first]]],
                 ['contractEntry' => ['JsIncompleteAssigned' => ['assignedEvent' => []]]],
-            ]),
+            ]]),
+            self::json(['activeAtOffset' => 55, 'nextPageToken' => '', 'activeContracts' => [
+                ['contractEntry' => ['JsActiveContract' => ['createdEvent' => $second]]],
+            ]]),
         )->activeContracts('alice::1220ab');
 
-        $this->assertSame([$contract], $contracts);
+        $this->assertSame([$first, $second], $contracts);
 
-        $body = json_decode((string) $this->sent[1]['request']->getBody(), true);
-        $this->assertSame(55, $body['activeAtOffset']);
-        $this->assertArrayHasKey('alice::1220ab', $body['eventFormat']['filtersByParty']);
+        $firstBody = json_decode((string) $this->sent[0]['request']->getBody(), true);
+        $this->assertSame('/v2/state/active-contracts-page', $this->sent[0]['request']->getUri()->getPath());
+        $this->assertArrayHasKey('alice::1220ab', $firstBody['eventFormat']['filtersByParty']);
+        $this->assertArrayNotHasKey('activeAtOffset', $firstBody);
+
+        $secondBody = json_decode((string) $this->sent[1]['request']->getBody(), true);
+        $this->assertSame('page-2', $secondBody['pageToken']);
+        // the node rejects a page token sent together with an offset
+        $this->assertArrayNotHasKey('activeAtOffset', $secondBody);
     }
 
-    public function testActiveContractsUsesGivenOffsetWithoutAskingLedgerEnd(): void
+    public function testActiveContractsSendsGivenOffsetWithFirstPageOnly(): void
     {
-        $this->client(self::json([]))->activeContracts('alice::1220ab', 10);
+        $this->client(
+            self::json(['activeAtOffset' => 10, 'nextPageToken' => 'page-2', 'activeContracts' => []]),
+            self::json(['activeAtOffset' => 10, 'nextPageToken' => '', 'activeContracts' => []]),
+        )->activeContracts('alice::1220ab', 10);
 
-        $this->assertCount(1, $this->sent);
-        $body = json_decode((string) $this->sent[0]['request']->getBody(), true);
-        $this->assertSame(10, $body['activeAtOffset']);
+        $this->assertSame(10, json_decode((string) $this->sent[0]['request']->getBody(), true)['activeAtOffset']);
+        $this->assertArrayNotHasKey('activeAtOffset', json_decode((string) $this->sent[1]['request']->getBody(), true));
+    }
+
+    public function testLoggerGetsMethodPathAndStatusButNoToken(): void
+    {
+        $logger = new class extends \Psr\Log\AbstractLogger {
+            public array $records = [];
+
+            public function log($level, \Stringable|string $message, array $context = []): void
+            {
+                $this->records[] = [$level, $message, $context];
+            }
+        };
+        $stack = HandlerStack::create(new MockHandler([self::json(['offset' => 55])]));
+        (new LedgerClient('http://ledger.test/', 'secret-token', logger: $logger, handler: $stack))->ledgerEnd();
+
+        [$level, $message, $context] = $logger->records[0];
+        $this->assertSame('debug', $level);
+        $this->assertSame(['GET', '/v2/state/ledger-end', 200], [$context['method'], $context['path'], $context['status']]);
+        $this->assertStringNotContainsString('secret-token', json_encode($logger->records));
     }
 
     public function testCreateSubmitsCreateCommandAndReturnsCreatedEvent(): void

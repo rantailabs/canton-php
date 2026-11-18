@@ -1,17 +1,32 @@
 {
     "name": "rantailabs/canton-php",
-    "description": "PHP client for the Canton JSON Ledger API",
+    "description": "PHP client and Laravel integration for the Canton Network JSON Ledger API",
     "type": "library",
+    "keywords": ["canton", "canton-network", "daml", "ledger", "blockchain", "laravel", "sdk"],
+    "homepage": "https://github.com/rantailabs/canton-php",
     "license": "Apache-2.0",
+    "authors": [
+        {
+            "name": "Rantai Labs",
+            "homepage": "https://github.com/rantailabs"
+        }
+    ],
+    "support": {
+        "issues": "https://github.com/rantailabs/canton-php/issues",
+        "source": "https://github.com/rantailabs/canton-php",
+        "security": "https://github.com/rantailabs/canton-php/security/advisories/new"
+    },
     "require": {
         "php": "^8.2",
         "ext-json": "*",
         "guzzlehttp/guzzle": "^7.8 || ^8.0",
-        "psr/simple-cache": "^2.0 || ^3.0"
+        "psr/simple-cache": "^2.0 || ^3.0",
+        "psr/log": "^2.0 || ^3.0"
     },
     "require-dev": {
         "phpunit/phpunit": "^11.0",
-        "orchestra/testbench": "^11.3"
+        "orchestra/testbench": "^10.0 || ^11.0",
+        "phpstan/phpstan": "^2.3"
     },
     "autoload": {
         "psr-4": {
@@ -37,6 +52,7 @@
         }
     },
     "scripts": {
-        "test": "phpunit"
+        "test": "phpunit",
+        "analyse": "phpstan analyse --memory-limit=512M"
     }
 }

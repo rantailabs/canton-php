@@ -40,12 +40,11 @@ final class ClientCredentials
         private readonly ?CacheInterface $cache = null,
         ?HandlerStack $handler = null,
     ) {
-        $this->http = new Client([
-            'http_errors' => false,
-            'connect_timeout' => 10,
-            'timeout' => 10,
-            'handler' => $handler,
-        ]);
+        $options = ['http_errors' => false, 'connect_timeout' => 10, 'timeout' => 10];
+        if ($handler !== null) {
+            $options['handler'] = $handler;
+        }
+        $this->http = new Client($options);
     }
 
     public function __invoke(): string
@@ -59,20 +58,17 @@ final class ClientCredentials
         if (is_array($cached) && time() < $cached['expiresAt'] - self::EARLY_RENEWAL) {
             [$this->token, $this->expiresAt] = [$cached['token'], $cached['expiresAt']];
 
-            return $this->token;
+            return $cached['token'];
         }
 
-        $this->fetch();
-        $this->cache?->set(
-            $key,
-            ['token' => $this->token, 'expiresAt' => $this->expiresAt],
-            $this->expiresAt - time(),
-        );
+        $token = $this->fetch();
+        $this->cache?->set($key, ['token' => $token, 'expiresAt' => $this->expiresAt], $this->expiresAt - time());
 
-        return $this->token;
+        return $token;
     }
 
-    private function fetch(): void
+    /** Ask the provider for a new token, remember it, and return it. */
+    private function fetch(): string
     {
         try {
             $response = $this->http->post($this->tokenUrl, ['form_params' => array_filter([
@@ -97,5 +93,7 @@ final class ClientCredentials
 
         $this->token = $body['access_token'];
         $this->expiresAt = time() + ($body['expires_in'] ?? 300);
+
+        return $this->token;
     }
 }

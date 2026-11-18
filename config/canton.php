@@ -8,6 +8,9 @@ return [
     // seconds to wait for the node before giving up
     'timeout' => env('CANTON_TIMEOUT', 30),
 
+    // write one debug line per request to the Laravel log (tokens and payloads are never logged)
+    'logging' => env('CANTON_LOGGING', false),
+
     // "shared-secret" for cn-quickstart LocalNet, "oauth2" for DevNet, TestNet and MainNet
     'auth' => env('CANTON_AUTH', 'shared-secret'),
 

@@ -53,10 +53,20 @@ final class LocalNetTest extends TestCase
         $local = array_values(array_filter($this->provider->parties(), fn (array $p) => $p['isLocal']));
         $this->assertNotEmpty($local);
 
-        foreach ($this->provider->activeContracts($local[0]['party']) as $contract) {
+        $party = $this->provider->authenticatedUser()['primaryParty'];
+        $this->assertNotEmpty($this->provider->connectedSynchronizers($party));
+        $this->assertNotEmpty($this->provider->packages());
+
+        $all = $this->provider->activeContracts($party);
+        foreach ($all as $contract) {
             $this->assertArrayHasKey('contractId', $contract);
             $this->assertArrayHasKey('templateId', $contract);
         }
+
+        // small pages force several requests; the result must be the same set
+        $this->assertGreaterThan(2, count($all));
+        $paged = $this->provider->activeContracts($party, pageSize: 2);
+        $this->assertEqualsCanonicalizing(array_column($all, 'contractId'), array_column($paged, 'contractId'));
     }
 
     public function testLicensingFlowAllowsAtMostThreeLicenses(): void
