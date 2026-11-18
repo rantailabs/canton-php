@@ -4,10 +4,14 @@ declare(strict_types=1);
 
 namespace RantaiLabs\Canton\Tests;
 
+use GuzzleHttp\Exception\ConnectException;
 use GuzzleHttp\Handler\MockHandler;
 use GuzzleHttp\HandlerStack;
 use GuzzleHttp\Middleware;
+use GuzzleHttp\Psr7\Request;
 use GuzzleHttp\Psr7\Response;
+use Illuminate\Cache\ArrayStore;
+use Illuminate\Cache\Repository;
 use PHPUnit\Framework\TestCase;
 use RantaiLabs\Canton\ClientCredentials;
 use RantaiLabs\Canton\LedgerClient;
@@ -18,7 +22,7 @@ final class ClientCredentialsTest extends TestCase
     /** @var array<int, array{request: \Psr\Http\Message\RequestInterface}> */
     private array $sent = [];
 
-    private function stack(Response ...$responses): HandlerStack
+    private function stack(Response|\Throwable ...$responses): HandlerStack
     {
         $stack = HandlerStack::create(new MockHandler($responses));
         $stack->push(Middleware::history($this->sent));
@@ -34,8 +38,8 @@ final class ClientCredentialsTest extends TestCase
     public function testRequestsTokenWithClientCredentialsGrant(): void
     {
         $credentials = new ClientCredentials(
-            'http://auth.test/token', 'my-client', 'my-secret', 'https://canton.network.global', null,
-            $this->stack(self::token('abc', 300)),
+            'http://auth.test/token', 'my-client', 'my-secret', 'https://canton.network.global',
+            handler: $this->stack(self::token('abc', 300)),
         );
 
         $this->assertSame('abc', $credentials());
@@ -88,12 +92,52 @@ final class ClientCredentialsTest extends TestCase
         }
     }
 
+    public function testCachedTokenIsSharedBetweenInstances(): void
+    {
+        $cache = new Repository(new ArrayStore());
+        $first = new ClientCredentials('http://auth.test/token', 'my-client', 'my-secret', cache: $cache,
+            handler: $this->stack(self::token('shared', 300)));
+        // no responses queued: this instance must not ask the provider
+        $second = new ClientCredentials('http://auth.test/token', 'my-client', 'my-secret', cache: $cache,
+            handler: $this->stack());
+
+        $this->assertSame('shared', $first());
+        $this->assertSame('shared', $second());
+    }
+
+    public function testCachedTokenAboutToExpireIsRenewed(): void
+    {
+        $cache = new Repository(new ArrayStore());
+        (new ClientCredentials('http://auth.test/token', 'my-client', 'my-secret', cache: $cache,
+            handler: $this->stack(self::token('short-lived', 10))))();
+
+        $credentials = new ClientCredentials('http://auth.test/token', 'my-client', 'my-secret', cache: $cache,
+            handler: $this->stack(self::token('next', 300)));
+
+        $this->assertSame('next', $credentials());
+    }
+
+    public function testUnreachableProviderThrowsLedgerException(): void
+    {
+        $credentials = new ClientCredentials('http://auth.test/token', 'my-client', 'my-secret', handler: $this->stack(
+            new ConnectException('Connection refused', new Request('POST', 'http://auth.test/token')),
+        ));
+
+        try {
+            $credentials();
+            $this->fail('Expected LedgerException');
+        } catch (LedgerException $e) {
+            $this->assertSame(0, $e->httpStatus);
+            $this->assertInstanceOf(ConnectException::class, $e->getPrevious());
+        }
+    }
+
     public function testLedgerClientAsksForTokenOnEveryRequest(): void
     {
         $tokens = ['first', 'second'];
         $client = new LedgerClient('http://ledger.test', function () use (&$tokens) {
             return array_shift($tokens);
-        }, $this->stack(
+        }, handler: $this->stack(
             new Response(200, [], '{"offset":1}'),
             new Response(200, [], '{"offset":2}'),
         ));

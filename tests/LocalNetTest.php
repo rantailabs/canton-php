@@ -98,6 +98,36 @@ final class LocalNetTest extends TestCase
         $createLicense($installId);
     }
 
+    public function testRetryWithSameCommandIdIsRejectedAsDuplicate(): void
+    {
+        $providerParty = $this->localParty($this->provider, 'app_provider');
+        $userParty = $this->localParty($this->user, 'app_user');
+        $commandId = 'retry-test-' . bin2hex(random_bytes(8));
+        $create = fn () => $this->user->create('#quickstart-licensing:Licensing.AppInstall:AppInstallRequest', [
+            'provider' => $providerParty,
+            'user' => $userParty,
+            'meta' => ['values' => new stdClass()],
+        ], $userParty, commandId: $commandId);
+
+        $first = $create();
+        $this->assertArrayHasKey('contractId', $first);
+
+        try {
+            $create();
+            $this->fail('Expected the retry to be rejected');
+        } catch (LedgerException $e) {
+            $this->assertSame('DUPLICATE_COMMAND', $e->errorCode);
+        }
+    }
+
+    public function testUnreachableNodeThrowsLedgerException(): void
+    {
+        $client = new LedgerClient('http://localhost:1', 'any-token', timeout: 2);
+
+        $this->expectException(LedgerException::class);
+        $client->version();
+    }
+
     private function localParty(LedgerClient $client, string $prefix): string
     {
         foreach ($client->parties() as $party) {

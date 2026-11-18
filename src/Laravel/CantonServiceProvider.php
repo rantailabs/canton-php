@@ -26,10 +26,12 @@ final class CantonServiceProvider extends ServiceProvider
                     $config['client_secret'],
                     $config['audience'],
                     $config['scope'],
+                    // share tokens between requests instead of fetching one per request
+                    $app['cache.store'],
                 ),
             };
 
-            return new LedgerClient($config['url'], $token);
+            return new LedgerClient($config['url'], $token, (float) $config['timeout']);
         });
     }
 

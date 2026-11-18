@@ -4,9 +4,11 @@ declare(strict_types=1);
 
 namespace RantaiLabs\Canton\Tests;
 
+use GuzzleHttp\Exception\ConnectException;
 use GuzzleHttp\Handler\MockHandler;
 use GuzzleHttp\HandlerStack;
 use GuzzleHttp\Middleware;
+use GuzzleHttp\Psr7\Request;
 use GuzzleHttp\Psr7\Response;
 use PHPUnit\Framework\TestCase;
 use RantaiLabs\Canton\LedgerClient;
@@ -23,7 +25,7 @@ final class LedgerClientTest extends TestCase
         $stack = HandlerStack::create(new MockHandler($responses));
         $stack->push(Middleware::history($this->sent));
 
-        return new LedgerClient('http://ledger.test/', 'my-token', $stack);
+        return new LedgerClient('http://ledger.test/', 'my-token', handler: $stack);
     }
 
     private static function json(array $body, int $status = 200): Response
@@ -117,6 +119,39 @@ final class LedgerClientTest extends TestCase
         $this->assertStringContainsString('"choiceArgument":{}', $body);
         $command = json_decode($body, true)['commands']['commands'][0]['ExerciseCommand'];
         $this->assertSame(['00old', 'Accept'], [$command['contractId'], $command['choice']]);
+    }
+
+    public function testOwnCommandIdIsSentSoRetriesCanBeDeduplicated(): void
+    {
+        $this->client(self::json(['transaction' => ['events' => [['CreatedEvent' => ['contractId' => '00abc']]]]]))
+            ->create('#pkg:Main:Asset', ['owner' => 'alice::1220ab'], 'alice::1220ab', commandId: 'order-42');
+
+        $body = json_decode((string) $this->sent[0]['request']->getBody(), true);
+        $this->assertSame('order-42', $body['commands']['commandId']);
+    }
+
+    public function testRequestsHaveATimeout(): void
+    {
+        $this->client(self::json(['version' => '3.5.7']))->version();
+
+        $this->assertEquals(30, $this->sent[0]['options']['timeout']);
+        $this->assertEquals(10, $this->sent[0]['options']['connect_timeout']);
+    }
+
+    public function testUnreachableNodeThrowsLedgerException(): void
+    {
+        $stack = HandlerStack::create(new MockHandler([
+            new ConnectException('Connection refused', new Request('GET', 'http://ledger.test/v2/version')),
+        ]));
+        $client = new LedgerClient('http://ledger.test/', 'my-token', handler: $stack);
+
+        try {
+            $client->version();
+            $this->fail('Expected LedgerException');
+        } catch (LedgerException $e) {
+            $this->assertSame(0, $e->httpStatus);
+            $this->assertInstanceOf(ConnectException::class, $e->getPrevious());
+        }
     }
 
     public function testErrorResponseThrowsLedgerExceptionWithCantonCode(): void

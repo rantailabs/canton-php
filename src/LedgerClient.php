@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace RantaiLabs\Canton;
 
 use GuzzleHttp\Client;
+use GuzzleHttp\Exception\TransferException;
 use GuzzleHttp\HandlerStack;
 use stdClass;
 
@@ -23,14 +24,21 @@ class LedgerClient
      * @param string $baseUrl JSON Ledger API address, e.g. http://localhost:3975
      * @param string|callable(): string $token Bearer token, or something that returns a fresh one
      *                                         on every call (e.g. ClientCredentials)
+     * @param float $timeout Seconds to wait for an answer before giving up
      * @param HandlerStack|null $handler Custom Guzzle handler, mainly for tests
      */
-    public function __construct(string $baseUrl, string|callable $token, ?HandlerStack $handler = null)
-    {
+    public function __construct(
+        string $baseUrl,
+        string|callable $token,
+        float $timeout = 30,
+        ?HandlerStack $handler = null,
+    ) {
         $this->token = $token;
         $this->http = new Client([
             'base_uri' => rtrim($baseUrl, '/'),
             'http_errors' => false,
+            'connect_timeout' => min($timeout, 10),
+            'timeout' => $timeout,
             'handler' => $handler,
         ]);
     }
@@ -90,14 +98,15 @@ class LedgerClient
      * Create a contract and wait until it is committed.
      *
      * @param string $templateId e.g. "#my-package:My.Module:MyTemplate"
+     * @param string|null $commandId See exercise()
      * @return array The created event (contractId, createArgument, ...)
      */
-    public function create(string $templateId, array $arguments, string $actAs): array
+    public function create(string $templateId, array $arguments, string $actAs, ?string $commandId = null): array
     {
         $events = $this->submit(['CreateCommand' => [
             'templateId' => $templateId,
             'createArguments' => $arguments ?: new stdClass(),
-        ]], $actAs);
+        ]], $actAs, $commandId);
 
         return $events[0]['CreatedEvent'];
     }
@@ -105,26 +114,36 @@ class LedgerClient
     /**
      * Exercise a choice on a contract and wait until it is committed.
      *
+     * @param string|null $commandId Your own ID for this command. When a call fails with a
+     *     network error, retry it with the same ID: if the first attempt did reach the ledger,
+     *     the retry is rejected with DUPLICATE_COMMAND instead of running twice.
+     *     A random ID is used when omitted.
      * @return mixed The value returned by the choice, e.g. a new contract ID
      */
-    public function exercise(string $templateId, string $contractId, string $choice, array $argument, string $actAs): mixed
-    {
+    public function exercise(
+        string $templateId,
+        string $contractId,
+        string $choice,
+        array $argument,
+        string $actAs,
+        ?string $commandId = null,
+    ): mixed {
         $events = $this->submit(['ExerciseCommand' => [
             'templateId' => $templateId,
             'contractId' => $contractId,
             'choice' => $choice,
             'choiceArgument' => $argument ?: new stdClass(),
-        ]], $actAs);
+        ]], $actAs, $commandId);
 
         return $events[0]['ExercisedEvent']['exerciseResult'];
     }
 
     /** Submit one command and return the events of the resulting transaction, root event first. */
-    private function submit(array $command, string $actAs): array
+    private function submit(array $command, string $actAs, ?string $commandId): array
     {
         $response = $this->request('POST', '/v2/commands/submit-and-wait-for-transaction', [
             'commands' => [
-                'commandId' => bin2hex(random_bytes(16)),
+                'commandId' => $commandId ?? bin2hex(random_bytes(16)),
                 'actAs' => [$actAs],
                 'commands' => [$command],
             ],
@@ -144,7 +163,12 @@ class LedgerClient
         if ($body !== null) {
             $options['json'] = $body;
         }
-        $response = $this->http->request($method, $path, $options);
+        try {
+            $response = $this->http->request($method, $path, $options);
+        } catch (TransferException $e) {
+            // node unreachable or too slow; no HTTP status
+            throw new LedgerException($e->getMessage(), 0, null, $e);
+        }
         $content = (string) $response->getBody();
         $status = $response->getStatusCode();
 

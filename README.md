@@ -26,6 +26,10 @@ $token = new ClientCredentials(
 $ledger = new LedgerClient('https://ledger.example.com', $token);
 ```
 
+Each PHP process keeps its own token. With PHP-FPM that means one token request
+per web request, so pass a PSR-16 cache (`cache: $cache`) to share tokens between
+processes. The Laravel integration does this automatically.
+
 `LedgerClient` accepts any callable that returns a token, so other token
 sources can be plugged in the same way.
 
@@ -67,8 +71,30 @@ Daml records with no fields (e.g. an empty `TextMap`) must be passed as
 See [examples/licensing-demo.php](examples/licensing-demo.php) for a full flow
 against the cn-quickstart licensing app.
 
+## Errors and retries
+
 Errors from the participant throw `RantaiLabs\Canton\LedgerException`
-with `httpStatus` and the Canton `errorCode`.
+with `httpStatus` and the Canton `errorCode`. When the node cannot be reached
+or does not answer within the timeout (30 seconds by default, see the
+`timeout` constructor argument), `httpStatus` is `0`.
+
+After a network error you cannot tell whether the command reached the ledger.
+To retry safely, give the command your own ID and reuse it on the retry. If the
+first attempt went through, the retry fails with `DUPLICATE_COMMAND` instead of
+running twice:
+
+```php
+$commandId = "issue-license-{$order->id}";
+
+try {
+    $ledger->exercise($templateId, $contractId, 'Issue', $args, actAs: $party, commandId: $commandId);
+} catch (LedgerException $e) {
+    if ($e->httpStatus === 0) {
+        // same ID: safe to retry. Throws DUPLICATE_COMMAND if the first attempt went through
+        $ledger->exercise($templateId, $contractId, 'Issue', $args, actAs: $party, commandId: $commandId);
+    }
+}
+```
 
 ## Laravel
 
@@ -77,6 +103,7 @@ Configure the connection in `.env`:
 
 ```dotenv
 CANTON_URL=http://localhost:3975
+CANTON_TIMEOUT=30
 CANTON_USER=ledger-api-user
 CANTON_AUDIENCE=https://canton.network.global
 CANTON_SECRET=unsafe
@@ -106,7 +133,7 @@ php artisan vendor:publish --tag=canton-config
 ## Tests
 
 ```bash
-composer test                     # unit tests
+composer test                          # unit tests
 CANTON_LOCALNET=1 composer test        # plus tests against a running cn-quickstart LocalNet
 CANTON_LOCALNET=oauth2 composer test   # same, for a LocalNet started with AUTH_MODE=oauth2
 ```
