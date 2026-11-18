@@ -29,6 +29,12 @@ $ledger = new LedgerClient('https://ledger.example.com', $token);
 `LedgerClient` accepts any callable that returns a token, so other token
 sources can be plugged in the same way.
 
+## Requirements
+
+- PHP 8.2 or newer
+- Guzzle 7 or 8
+- Laravel 12 or 13, for the optional Laravel integration
+
 ## Install
 
 ```bash
